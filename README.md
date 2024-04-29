@@ -1,3 +1,5 @@
+# NLP: Predicting recipe ratings with user reviews
+
 This group project intends to explore how text such as users reviews and recipes descriptions can be used to obtain insights into recipes ratings. It accomplishes this by using a data-set is called "**Food.com Recipes and Interactions**" which it was downloaded from [kaggle](https://www.kaggle.com/datasets/shuyangli94/food-com-recipes-and-user-interactions). It consists of more than 180.000 recipes and 700.000 recipe reviews covering 18 years of user interactions and uploads on the website [Food.com](Food.com) (formerly GeniusKitchen). The following is the table of contents of our project.
 
 ## Table of Contents
