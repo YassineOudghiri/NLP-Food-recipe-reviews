@@ -1,0 +1,1888 @@
+------------------------------------------------------------------------
+
+---
+title: "Final Group Project - Text Analysis for Business "
+author: "Authors: Aditya Moudgil; Henrique Moreira; Idil Zorlu; Jacop Kachel; Yassine Drissi Oudghiri"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+This group project intends to explore how text such as users reviews and recipes descriptions can be used to obtain insights into recipes ratings. It accomplishes this by using a data-set is called "**Food.com Recipes and Interactions**" which it was downloaded from [kaggle](https://www.kaggle.com/datasets/shuyangli94/food-com-recipes-and-user-interactions). It consists of more than 180.000 recipes and 700.000 recipe reviews covering 18 years of user interactions and uploads on the website [Food.com](Food.com) (formerly GeniusKitchen). The following is the table of contents of our project.
+
+## Table of Contents
+
+1.  Importing and preparing the data
+
+2.  Exploratory data analysis
+
+    2.1. Main findings
+
+    2.2. Research Question
+
+3.  Applying unigrams & bigrams and bigrams & trigrams stemming to the users' reviews in order to predict recipes' ratings
+
+    3.1. Users' reviews - LASSO Model for unigrams and bigrams
+
+    3.2. Users' reviews - LASSO Model for bigrams and trigrams
+
+    3.3. Users' reviews - Binary LASSO Model for unigrams and bigrams
+
+    3.4. Users' reviews - Binary LASSO Model for bigrams and trigrams
+
+    3.5. Accuracy Plots
+
+4.  Applying unigrams & bigrams stemming to users' reviews and to recipes' descriptions, steps and ingredients to predict recipes' ratings
+
+    4.1. Recipes' descriptions - LASSO Model for unigrams and bigrams
+
+    4.2. Recipes' Steps - LASSO Model for unigrams and bigrams
+
+    4.3. Recipes' Steps - LASSO Model for unigrams and bigrams
+
+    4.4. Accuracy plots
+
+5.  Benchmarks
+
+    5.1. Word Count and Traditional Sentiment Analysis
+
+    5.2. Positive Sentiment, Negative Sentiment and Uncertainity Sentiment
+
+    5.3. LM Dictionary with Grammar Awareness
+
+    5.4. Plotting the best model with the benchmarks
+
+6.  Transfer learning - training a model on positive reviews to predict negative reviews and vice-versa
+
+7.  Politeness on Review Data
+
+8.  Limitations and improvements
+
+## 1. Importing and preparing the data
+
+The first step is to load the necessary libraries for the analysis.
+
+```{r message=FALSE}
+# Libraries
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(ggplot2)
+library(quanteda)
+library(ggrepel)
+library(textclean)
+library(glmnet)
+library(sentimentr)
+library(spacyr) 
+library(politeness)
+library(data.table)
+library(caret)
+library(text2vec)
+library(tidytext)
+library(textdata)
+library(wordcloud)
+library(textdata)
+
+```
+
+We also load pre-written functions and RDS files that will be useful for analysing text.
+
+```{r}
+# Also place auxiliary functions "TAB_dfm.R" and RDS files like "vecSmall.RDS" here:
+source("vectorFunctions.R") 
+source("TAB_dfm.R")
+source("kendall_acc.R")
+vecSmall<-readRDS("vecSmall.RDS")
+load("wfFile.RData")
+```
+
+At last, we import the two data-sets that we're going to focus on: "RAW_recipes", which contains several information about "food.com" recipes and "RAW_interactions", which contains information about "food.com" users' reviews of the recipes.
+
+```{r}
+# Loading the two data-sets
+raw_recipes <- read.csv("RAW_recipes.csv", stringsAsFactors = FALSE)
+interactions <- read.csv("RAW_interactions.csv", stringsAsFactors = FALSE)
+# Let's merge
+merged_data <- left_join(interactions, raw_recipes, by = c("recipe_id" = "id"))
+```
+
+## 2. Exploratory Data Analysis
+
+Let's take a quick look at the data.
+
+```{r}
+head(merged_data, 1) # Restricting to one row because the columns containing text make the output message too big
+# Checking the class type of each attribute
+sapply(merged_data, class)
+# Checking how many rows the data-set has
+cat("The merged data-set contains", nrow(merged_data), "rows")
+```
+
+The merged data-set consists of 1.132.367 rows and 16 variables - 7 integer and 9 character.
+
+We can see that the column "date" is in character format so we'll change it to date format.
+
+```{r}
+merged_data$date <- as.Date(merged_data$date)
+```
+
+Let's check if there are any NA values in the data-set.
+
+```{r}
+cat("The merged data-set has", sum(is.na(merged_data)), "NA values")
+```
+
+```{r}
+merged_data <- merged_data %>% filter(rating != 0)
+```
+
+
+For better-understanding purposes, the following is a description of each variable present in the data-set:
+
+-   **user_id** -\> User ID
+
+-   **recipe_id** -\> Recipe ID
+
+-   **date** -\> Date of interaction
+
+-   **rating** -\> Rating given by a user
+
+-   **review** -\> Text of the review
+
+-   **name** -\> Name of the recipe
+
+-   **minutes** -\> Estimate in minutes of how it takes to cook a meal according to the recipe
+
+-   **contributor_id** -\> User ID of who submitted the recipe
+
+-   **submitted** -\> Date recipe was submitted
+
+-   **tags** -\> Tags for the recipe
+
+-   **nutrition** -\> Nutrition information for: number of calories; total fat (PDV); sugar (PDV); sodium (PDV); protein (PDV); saturated fat (PDV); carbohydrates (PDV) - note: PDV means Percent Daily Value
+
+-   **n_steps** -\> Number of steps in the recipe
+
+-   **steps** -\> Text for recipe steps, in order
+
+-   **description** -\> User-provided description.
+
+We'll create a new feature called "word_count" that accounts for the number of words used when writing a review. This will allow us to analyse the numbers of words used in the users' reviews.
+
+Note: We'll look at review text in a more detailed matter in the project below.
+
+```{r}
+merged_data$word_count <- lengths(strsplit(merged_data$review, ' '))
+average_words <- round(sum(merged_data$word_count)/nrow(merged_data),0)
+max_words <- max(merged_data$word_count)
+
+cat(" The average number of words used in a review is", average_words, "\n",
+    "The maximum number of words used in a review is", max_words)
+
+```
+
+Do people write more words when it's a positive review or vice-versa? Let's check that.
+
+```{r}
+# Positive reviews
+n_words_positive <- sum(ifelse(merged_data$rating == 4 | merged_data$rating == 5, merged_data$word_count, 0))
+n_positive_reviews <- sum(merged_data$rating == 4 | merged_data$rating == 5)
+avg_words_positive_reviews <- round(n_words_positive / n_positive_reviews, 1)
+
+# Negative reviews
+n_words_negative <- sum(ifelse(merged_data$rating == 0 | merged_data$rating == 1 | merged_data$rating == 2 | merged_data$rating == 3, merged_data$word_count, 0))
+n_negative_reviews <- nrow(merged_data) - n_positive_reviews
+avg_words_negative_reviews <- round(n_words_negative / n_negative_reviews, 1)
+
+
+# Let's plot it
+average_words <- c(avg_words_positive_reviews, avg_words_negative_reviews)
+review_type <- c("Positive", "Negative")
+barplot(average_words, names.arg = review_type, col = c("green", "red"),
+        main = "Average Number of Words in Reviews",
+        xlab = "Review Type", ylab = "Average Words",
+        ylim = c(0, max(average_words) + 1))  # Adjust ylim to ensure the plot doesn't cut off
+
+
+cat(" The average number of words used in a positive review is", avg_words_positive_reviews,
+    "while the average number of words used in a negative review is", avg_words_negative_reviews)
+```
+
+We see that the number of words used in positive and negative reviews is quite similar.
+
+Let's look at how many reviews the users write.
+
+```{r}
+# Count the number of reviews per user_id
+user_review_counts <- table(merged_data$user_id)
+
+# Convert to data frame and sort by counts
+user_review_counts_df <- data.frame(
+  user_id = as.character(names(user_review_counts)),
+  review_count = as.numeric(user_review_counts)
+)
+
+# Sort the data frame by review_count in descending order
+user_review_counts_df <- user_review_counts_df[order(-user_review_counts_df$review_count), ]
+
+# Average and maximum number of reviews
+average_n_reviews <- round(sum(user_review_counts_df$review_count)/nrow(user_review_counts_df),1)
+max_n_reviews <- max(user_review_counts_df$review_count)
+
+cat(" The average number of reviews written by the same user is", average_n_reviews, "\n",
+    "The maximum number of reviews written by the same user is", max_n_reviews)
+```
+
+Are there correlated variables?
+
+```{r}
+numeric_data <- merged_data[sapply(merged_data, is.numeric)]
+cor_matrix <- cor(numeric_data)
+#print(cor_matrix) if we want to see a specific value
+corrplot(cor_matrix, type = "lower",  tl.srt = 45, title = "Correlation Plot")
+```
+
+There seems to be **no heavily correlated variables**, with the exception of a moderate positive correlation between the number of steps and the number of ingredients in a recipe - The addition of more ingredients to a recipe seems to correlate with an increase in the number of steps required to fulfill the recipe.
+
+Besides that, it's interesting to see that the number of words in a review is not correlated with an user giving a lower or higher rating to a recipe.
+
+We can also explore further on how each type of nutrition may affect a recipe's rating. Currently, the column "nutrition" presents information regarding the different nutritional elements in a confusing way. Let's separate them into different columns.
+
+```{r}
+# Separating the different nutritional values into separate columns
+final_data <- merged_data %>%
+  mutate(nutrition = str_replace_all(nutrition, "\\[|\\]", "")) %>%
+  separate(nutrition, into = c("calories_n", "total_fat_pdv", "sugar_pdv", "sodium_pdv", "protein_pdv", "sat_fat_pdv", "carbs_pdv"), sep = ",") %>%
+  mutate_at(vars(calories_n, total_fat_pdv, sugar_pdv, sodium_pdv, protein_pdv, sat_fat_pdv, carbs_pdv), as.numeric)
+```
+
+```{r}
+# Selecting these newly created columns with also the rating attribute
+# We also select the name of each recipe in case we want to extract one in the future
+nutrition_data <- final_data %>%
+  select(name, calories_n, total_fat_pdv, sugar_pdv, sodium_pdv, protein_pdv, sat_fat_pdv, carbs_pdv, rating) %>%
+  distinct() %>%
+  head(10)
+
+summary(nutrition_data)
+```
+
+Now, we can calculate the correlation between each nutritional value with a recipe's rating (for the overall purpose of this project, we're not interested in seeing how each nutritional value correlates with each other).
+
+```{r}
+nutrition_data_numeric <- nutrition_data[sapply(nutrition_data, is.numeric)]
+
+# Calculate correlation coefficients between 'rating' and each nutrition variable
+correlation_with_rating <- sapply(nutrition_data_numeric, function(x) cor(x, nutrition_data_numeric$rating))
+
+# Create a dataframe to display correlation coefficients
+correlation_df <- data.frame(Nutrition_Type = names(correlation_with_rating), Correlation_with_Rating = correlation_with_rating)
+
+# Print the correlation coefficients
+print(correlation_df)
+
+```
+
+It's interesting to see how different types of nutrition correlate with a recipe's rating, We see that the amount of sugar and carbohydrates has a moderate negative correlation with a recipe's rating while the other nutritional types display a moderate positive correlation.
+
+But none of these display a significant enough correlation coeficient to leads us into conducting further analysis on this.
+
+Moving on, we'll look at the distribution of recipes' ratings.
+
+```{r}
+# Count the frequency of each rating value
+rating_freq <- table(final_data$rating)
+
+# Convert the frequency table to a data frame
+rating_df <- data.frame(rating = as.numeric(names(rating_freq)),
+                        freq = as.numeric(rating_freq))
+
+# Calculate the percentage of each rating
+total_ratings <- sum(rating_df$freq)
+rating_df$percentage <- (rating_df$freq / total_ratings) * 100
+
+# Plot the frequency and percentage
+ggplot(rating_df, aes(x = rating, y = freq)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), vjust = -0.5, size = 3) +
+  xlab("Rating") +
+  ylab("Frequency") +
+  ggtitle("Ratings Frequency and Percentage") +
+  theme_minimal()
+```
+
+We can see that the rating scores are heavily skewed to ratings of 4 and especially 5. This could mean that people are more inclined to give a review if they had a positive experience when using a recipe.
+
+Before concluding, we'll present some word clouds focused on the recipes' ingredients and on the steps
+
+```{r}
+# Ingredients
+ingredients <- final_data %>%
+  select(ingredients) %>%
+  mutate(ingredients = str_replace_all(ingredients, "[\\[\\]']", "")) %>% 
+  separate_rows(ingredients, sep = "\\s+") %>%
+  filter(ingredients != "") %>%  # Remove empty strings
+  count(ingredients) %>%
+  filter(!(ingredients %in% c("s", "the", "and", "or", "a")))  # Filter out stop words
+
+suppressWarnings(
+  wordcloud(
+  words = ingredients$ingredients, 
+  freq = ingredients$n, 
+  max.words = 200, 
+  random.order = FALSE,
+  scale = c(3, 0.5),
+  colors = brewer.pal(8, "Dark2")
+))
+
+# Get the top 5 most used ingredients
+top_ingredients <- ingredients %>%
+  top_n(5, n) %>%
+  arrange(desc(n))
+
+# Print the top 5 most used ingredients as a list
+cat("Top 5 most used ingredients:\n")
+cat(paste(top_ingredients$ingredients, collapse = ", "))
+
+```
+
+The 5 most used ingredients on recipes from "food.com" are: salt, pepper, sugar, oil and butter. This finding seems pretty reasonable as most traditional dishes requires these ingredients, especially during preparation.
+
+```{r}
+# Tags word cloud
+tags <- final_data %>%
+  select(tags) %>%
+  mutate(tags = str_replace_all(tags, "[\\[\\]']", "")) %>%
+  separate_rows(tags, sep = "\\s*,\\s*") %>%  # Separates tags by comma and remove spaces
+  filter(tags != "") %>%  # Removes empty strings
+  count(tags) %>%
+  filter(!(tags %in% c("s", "the", "and", "or", "a")))  # Filters out stop words
+
+suppressWarnings(
+  wordcloud(
+  words = tags$tags, 
+  freq = tags$n, 
+  max.words = 150, 
+  random.order = FALSE,
+  scale = c(3, 0.5),
+  colors = brewer.pal(8, "Dark2"),
+  warn = FALSE 
+)
+)
+
+# Get the top 5 most used tags
+top_tags <- tags %>%
+  top_n(5, n) %>%
+  arrange(desc(n))
+
+# Print the top 5 most used tags as a list
+cat("Top 5 most used tags:\n")
+cat(paste(top_tags$tags, collapse = ", "))
+
+```
+
+The 5 most used tags on recipes from "food.com" are preparation, time-to-make, course, dietary and main-ingredient.
+
+### 2.1. Main findings
+
+The main findings from the exploratory data analysis are:
+
+-   The average and maximum numbers of words used in a review are 54 and 1184, respectively;
+
+-   Users on average write almost same number of words for positive reviews and for negative reviews.
+
+-   The average and maximum numbers of reviews written by the same user-id are 5, and 7671, respectively;
+
+-   The addition of more ingredients to a recipe seems to correlate with an increase in the number of steps required to fulfill the recipe, which follows common-sense;
+
+-   The number of words used to write a review of a recipe has almost no correlation with the rating the user gives to the recipe, at least from a simplified approach;
+
+-   Different types of nutrition somewhat correlate with an higher or lower ratings;
+
+-   The recipes' ratings are heavily skewed to higher values, such as 4 or 5, out of a scale of 0 to 5, which potentially indicates that users tend to leave a review on a recipe if it had a good experience using it;
+
+-   The 5 most used ingredients on recipes from "food.com" are: salt, pepper, sugar, oil and butter.
+
+### 2.2. Research Question
+
+Based on the exploratory data analysis, our group decided to pursue the following research question.
+
+"**How do user reviews compare to recipe details in predicting recipe ratings?**"
+
+## 3. Applying unigrams & bigrams and bigrams & trigrams stemming to the users' reviews in order to predict recipes' ratings
+
+First step is splitting the data-set.
+
+```{r}
+set.seed(123) 
+
+# Calculate the number of rows to sample for the training set - which we already did during the xploratory data analysis
+n_rows <- nrow(final_data)
+train_indices <- sample(1:n_rows, size = floor(0.8 * n_rows))
+
+# Create training and test sets
+train_set <- final_data[train_indices, ]
+test_set <- final_data[-train_indices, ]
+```
+
+Based on this, we'll construct two models:
+
+-   LASSO Model for unigrams and bigrams
+
+-   LASSO Model for bigrams and trigrams
+
+### 3.1. Users' reviews - LASSO Model for unigrams and bigrams
+
+```{r}
+# First, we stem both the training and test set on unigrams and bigrams
+dfm_train_12<-TAB_dfm(train_set$review,ngrams=1:2)
+ dfm_test_12<-TAB_dfm(test_set$review,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12))
+  
+# We then save them so that we do not have to run these everytime as it takes a lot of time
+saveRDS(dfm_train_12, "dfm_train_12.rds")
+saveRDS(dfm_test_12, "dfm_test_12.rds")
+
+# Since we already saved them, we just read them
+#dfm_train_12 <- readRDS("dfm_train_12.rds")
+#dfm_test_12 <- readRDS("dfm_test_12.rds")
+  
+# Now we create the Lasso model
+lasso_dfm_12<-glmnet::cv.glmnet(x=dfm_train_12, 
+                             y=train_set$rating)
+
+# And we plot coefficents for the lasso model
+plot(lasso_dfm_12, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+# At last, we use this model to predict the ratings on the test set
+test_dfm_12_predict <- predict(lasso_dfm_12, newx=dfm_test_12,
+                               s='lambda.min')
+
+acc_ngram_12 <- kendall_acc(test_dfm_12_predict, test_set$rating)
+
+# Next step is plotting the features
+plotCoefs_lasso_dfm_12<-lasso_dfm_12 %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12<-data.frame(ngram=colnames(dfm_train_12), freq=colMeans(dfm_train_12))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.1
+low_threshold <- -0.1
+
+plotDat_relevant_coefficients <- bind_rows(plotCoefs_lasso_dfm_12 %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12 %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+# And we get this final plot
+plotDat_relevant_coefficients %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+
+```
+
+From this plot based on the Unigrams and Bigrams model, we can see that stemmed words such as "thank, great, perfect, amaz, winner and just_right" indicate that the recipe is more likely to have a higher rating, while words like "care, salti, howev and yet" are correlated with having a lower rating.
+
+### 3.2. Users' reviews - LASSO Model for bigrams and trigrams
+
+```{r}
+# Again, we stem both the training and test set, but now on bigrams and trigrams
+dfm_train_23<-TAB_dfm(train_set$review, ngrams=2:3)
+
+dfm_test_23<-TAB_dfm(test_set$review,
+                           ngrams=2:3,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_23))
+
+# We create the Lasso Model
+lasso_dfm_23<-glmnet::cv.glmnet(x=dfm_train_23, 
+                             y=train_set$rating)
+
+# Plot the coefficents of the Lasso Model
+plot(lasso_dfm_23, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+# And we use the Lasso Model to predict the rating
+test_dfm_23_predict <- predict(lasso_dfm_23, newx=dfm_test_23,
+                               s='lambda.min')
+
+acc_ngram_23 <- kendall_acc(test_dfm_23_predict, test_set$rating)
+
+# We plot the features' coefficients and this time we don't need to use thresholds
+# As the resulting plot is easy to visualize
+plotCoefs_lasso_dfm_23<-lasso_dfm_23 %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotDat_lasso_dfm_23<-plotCoefs_lasso_dfm_23 %>%
+  left_join(data.frame(ngram=colnames(dfm_train_23),
+                       freq=colMeans(dfm_train_23))) %>%
+  mutate_at(vars(score,freq),~round(.,3))
+
+plotDat_lasso_dfm_23 %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Bigrams and Trigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+```
+
+From this plot based on the Bigrams and Trigrams model, we can see that stemmed words such as "turn_great, great_recip, realli_enjoy, thank_recip, famili_love and definit_make" are correlated with the recipe having a higher rating, while words like "thank_much_share, good_recip, thank_great_recip and veri_easi_make" are correlated with a lower rating, which is odd as these words seem to convey a good experience with the recipe.
+
+Instead of trying to predict the exact rating a recipe has, we can have a more broad approach and try to predict if the review is going to be negative or positive.
+
+We'll be considering a review to be negative if the rating is 3 or lower and to be positive if it's 4 or 5. The high skewness of the ratings distribution towards higher ratings made us choose this threshold instead of the median.
+
+```{r}
+# Let's start by creating our binary rating - This is only in case we want to do a new split in the future
+final_data_binary <- final_data
+final_data_binary$binary <- ifelse(final_data_binary$rating <= 3, 0, 1 )
+
+# Creating the binary rating column for the already existing training and testing data sets
+train_set_binary <- train_set
+train_set_binary$binary <- ifelse(train_set_binary$rating <= 3, 0, 1 )
+
+test_set_binary <- test_set
+test_set_binary$binary <- ifelse(test_set_binary$rating <= 3, 0, 1 )
+
+```
+
+### 3.3. Users' reviews - Binary LASSO Model for unigrams and bigrams
+
+```{r}
+# We repeat the same steps: stem the training and test sets
+dfm_train_12_binary<-TAB_dfm(train_set_binary$review,ngrams=1:2)
+dfm_test_12_binary<-TAB_dfm(test_set_binary$review,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_binary))
+  
+# Train a Lasso model on this
+lasso_dfm_12_binary<-glmnet::cv.glmnet(x=dfm_train_12_binary, 
+                             y=train_set_binary$binary)
+
+# Plot the lasso coefficents
+plot(lasso_dfm_12_binary, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+# Test the accuracy of the model
+test_dfm_12_binary_predict <- predict(lasso_dfm_12_binary, newx=dfm_test_12_binary,s='lambda.min')
+
+acc_ngram_12_binary <- kendall_acc(test_dfm_12_binary_predict, test_set_binary$binary)
+
+
+# Let's plot it now
+plotFreqs_lasso_dfm_12_binary<-data.frame(ngram=colnames(dfm_train_12_binary), freq=colMeans(dfm_train_12_binary))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.1
+low_threshold <- -0.1
+
+plotCoefs_lasso_dfm_12_binary<-lasso_dfm_12_binary %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotDat_lasso_dfm_12_binary <- bind_rows(plotCoefs_lasso_dfm_12 %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12 %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_binary) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+# And we get this final plot
+plot_binary_unigrams_bigrams <- plotDat_lasso_dfm_12_binary %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Binary Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_binary_unigrams_bigrams, "plot_binary_unigrams_bigrams.png")
+
+print(plot_binary_unigrams_bigrams)
+```
+
+From this plot based on the Unigrams and Bigrams model with binary rating, we can see that stemmed words such as "just_right, thank, tasti, excellent, veri_much and just_like" are correlated with the recipe having a higher rating, while words like "rate, expect, miss and mayb" are correlated with a lower rating.
+
+### 3.4. Users' reviews - Binary LASSO Model for bigrams and trigrams
+
+```{r}
+dfm_train_23_binary<-TAB_dfm(train_set_binary$review,ngrams=2:3)
+
+dfm_test_23_binary<-TAB_dfm(test_set_binary$review,
+                           ngrams=2:3,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_23_binary))
+
+
+lasso_dfm_23_binary<-glmnet::cv.glmnet(x=dfm_train_23_binary, y=train_set_binary$rating)
+
+# Plot coefficents
+plot(lasso_dfm_23_binary, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+test_dfm_23_binary_predict <- predict(lasso_dfm_23_binary, newx=dfm_test_23_binary, s='lambda.min')
+
+acc_ngram_23_binary <- kendall_acc(test_dfm_23_binary_predict, test_set_binary$binary)
+
+# Plot word map
+plotCoefs_lasso_dfm_23_binary<-lasso_dfm_23_binary %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotDat_lasso_dfm_23_binary<-plotCoefs_lasso_dfm_23_binary %>%
+  left_join(data.frame(ngram=colnames(dfm_train_23_binary),
+                       freq=colMeans(dfm_train_23_binary))) %>%
+  mutate_at(vars(score,freq),~round(.,3))
+
+plotDat_lasso_dfm_23_binary %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Bigrams and Trigrams Model for binary rating")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+```
+
+From this plot based on the Bigrams and Trigrams model with binary rating, we can see that stemmed words such as "just_right, thank, tasti, excellent, veri_much and just_like" are correlated with the recipe having a higher rating, while words like "rate, expect, miss and mayb" are correlated with a lower rating.
+
+### 3.5. Plotting the models accuracies
+
+```{r}
+# Let's first create a data frame with the accuracies
+accuracies <- data.frame(
+  Model = c("Unigrams and Bigrams", "Bigrams and Trigrams", "Binary Unigrams and Bigrams", "Binary Bigrams and Trigrams"),
+  Accuracy = c(acc_ngram_12, acc_ngram_23, acc_ngram_12_binary, acc_ngram_23_binary)
+)
+
+# Plotting accuracies
+bind_rows(acc_ngram_12 %>%
+            mutate(model="Unigrams and Bigrams"),
+          acc_ngram_23%>%
+            mutate(model="Bigrams and Trigrams"),
+          acc_ngram_12_binary %>%
+            mutate(model="Binary Unigrams and Bigrams"),
+          acc_ngram_23_binary %>%
+            mutate(model="Binary Bigrams and Trigrams")
+) %>% 
+  ggplot(aes(x=model,color=model,
+             y=acc,ymin=lower,ymax=upper)) +
+  geom_hline(yintercept=50) +              
+  geom_point() +                           
+  geom_errorbar(width=.4) + 
+   geom_text(aes(label = paste0(acc, "%")), hjust = 1.2, vjust = 0) + 
+  labs(x="Model",                 
+       y="Accuracy") +  
+  coord_flip() + 
+  theme_bw() +                             
+  theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=24),
+        panel.grid = element_blank(),
+        strip.text=element_text(size=10),
+        strip.background = element_rect(fill="white"),
+        legend.position = "none")       
+
+```
+
+Interesting enough, the Unigrams and Bigrams model used to predict a specific rating is the most accurate of all the models. Given this, we'll continue our analysis with trying to predict a specific rating and not just if the review is positive or negative.
+
+## 4. Applying unigrams & bigrams stemming to users' reviews and to recipes' descriptions, steps and ingredients to predict recipes' ratings
+
+Having established that the Lasso Model based on Unigrams & Bigrams was the most accurate for the Users' reviews, we'll apply the same approach to recipes' descriptions, steps and ingredients.
+
+### 4.1. Recipes' descriptions - LASSO Model for unigrams and bigrams
+
+```{r}
+# unigrams and bigrams model on description
+
+dfm_train_12_description<-TAB_dfm(train_set$description,ngrams=1:2)
+dfm_test_12_description<-TAB_dfm(test_set$description,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_description))
+
+
+  
+lasso_dfm_12_description<-glmnet::cv.glmnet(x=dfm_train_12_description, 
+                             y=train_set$rating)
+
+# Plot coefficents
+plot(lasso_dfm_12_description, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+test_dfm_12_predict_description<-predict(lasso_dfm_12_description,newx = dfm_test_12_description,
+                          s="lambda.min")
+
+
+acc_ngram_12_description<- kendall_acc(test_dfm_12_predict_description,test_set$rating)
+
+# Plot word map
+plotCoefs_lasso_dfm_12_description<-lasso_dfm_12_description %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+```
+
+```{r}
+plotFreqs_lasso_dfm_12_description<-data.frame(ngram=colnames(dfm_train_12_description),
+                                               freq=colMeans(dfm_train_12_description))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0
+low_threshold <- -0
+
+plotDat_relev_coeffs_lasso_dfm_12_description <- bind_rows(plotCoefs_lasso_dfm_12_description %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12_description %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_description) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plotDat_relev_coeffs_lasso_dfm_12_description %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Description")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+```
+
+### 4.2. Recipes' Steps - LASSO Model for unigrams and bigrams
+
+```{r}
+# unigrams and bigrams model on steps
+
+dfm_train_12_steps <-TAB_dfm(train_set$steps,ngrams=1:2)
+dfm_test_12_steps<-TAB_dfm(test_set$steps,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_steps))
+  
+lasso_dfm_12_steps<-glmnet::cv.glmnet(x=dfm_train_12_steps, y=train_set$rating)
+
+test_dfm_12_predict_steps<-predict(lasso_dfm_12_steps,newx = dfm_test_12_steps,
+                          s="lambda.min")
+
+acc_ngram_12_steps<-kendall_acc(test_dfm_12_predict_steps,test_set$rating)
+
+
+# Plot coefficents
+plot(lasso_dfm_12_steps, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+# Plot word map
+plotCoefs_lasso_dfm_12_steps<-lasso_dfm_12_steps %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_steps<-data.frame(ngram=colnames(dfm_train_12_steps), freq=colMeans(dfm_train_12_steps))
+```
+
+```{r}
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0
+low_threshold <- -0
+
+plotDat_rel_coeffs_lasso_dfm_12_steps<- bind_rows(plotCoefs_lasso_dfm_12_steps %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12_steps %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plotDat_rel_coeffs_lasso_dfm_12_steps %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Step List")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+```
+
+### 4.3. Recipes' ingredients - LASSO Model for unigrams and bigrams
+
+```{r}
+# unigrams and bigrams model on ingredients
+
+dfm_train_12_ingredients <-TAB_dfm(train_set$ingredients,ngrams=1:2)
+dfm_test_12_ingredients<-TAB_dfm(test_set$ingredients,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_ingredients))
+  
+lasso_dfm_12_ingredients<-glmnet::cv.glmnet(x=dfm_train_12_ingredients, y=train_set$rating)
+
+test_dfm_12_predict_ingredients<-predict(lasso_dfm_12_ingredients,newx = dfm_test_12_ingredients,
+                          s="lambda.min")
+
+acc_ngram_12_ingredients<-kendall_acc(test_dfm_12_predict_ingredients,test_set$rating)
+
+# Plot coefficents
+plot(lasso_dfm_12_ingredients, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+# Plot word map
+plotCoefs_lasso_dfm_12_ingredients<-lasso_dfm_12_ingredients %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_ingredients<-data.frame(ngram=colnames(dfm_train_12_ingredients), freq=colMeans(dfm_train_12_ingredients))
+```
+
+```{r}
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.03
+low_threshold <- -0.03
+
+plotDat_relev_coefficients_lasso_dfm_12_ingredients <- bind_rows(plotCoefs_lasso_dfm_12_ingredients %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12_ingredients %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_ingredients) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plotDat_relev_coefficients_lasso_dfm_12_ingredients %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Ingredient")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+```
+
+### 4.4. Accuracy plots
+
+```{r}
+# Plotting accuracies
+bind_rows(acc_ngram_12 %>%
+            mutate(model="DFM User Reviews"),
+          acc_ngram_12_description%>%
+            mutate(model="DFM Recipes Descriptions"),
+          acc_ngram_12_steps %>%
+            mutate(model="DFM Recipes Steps"),
+          acc_ngram_12_ingredients %>%
+            mutate(model="DFM Ingredients")
+) %>% 
+  ggplot(aes(x=model,color=model,
+             y=acc,ymin=lower,ymax=upper)) +
+  geom_hline(yintercept=50) +              
+  geom_point() +                           
+  geom_errorbar(width=.4) + 
+   geom_text(aes(label = paste0(acc, "%")), hjust = 1.2, vjust = 0) + 
+  labs(x="Model",                 
+       y="Accuracy") +  
+  coord_flip() + 
+  theme_bw() +                             
+  theme(axis.text=element_text(size=10),
+        axis.title=element_text(size=24),
+        panel.grid = element_blank(),
+        strip.text=element_text(size=10),
+        strip.background = element_rect(fill="white"),
+        legend.position = "none")       
+
+```
+
+Based on this accuracy plot, we can see that the Unigram and Bigrams model applied to the users' reviews got the highest accuracy score and is the model we'll be focusing on.
+
+## 5. Benchmarks
+
+After concluding the best model to predict a recipe rating, we now want to compare it with benchmarks to have a better understanding of the models performance power. That's why we decided to create the 7 following benchmarks:
+
+-   Word Count;
+
+-   Traditional Sentiment Analysis;
+
+-   Traditional Positive Dictionary;
+
+-   Traditional Uncertanty Dictionary;
+
+-   Traditional Negative Dictionary;
+
+-   LM Dictionary with Grammar Awareness
+
+-   Exclamation Marks
+
+### 5.1. Word Count and Traditional Sentiment Analysis
+
+```{r}
+sentiment_and_word_count <- test_set %>%
+  mutate(review_sent=syuzhet::get_sentiment(review),
+         review_wdct=str_count(review,"[[:alpha:]]+"))
+
+acc_wdct<-kendall_acc(sentiment_and_word_count$rating,sentiment_and_word_count$review_wdct)
+
+
+acc_sent<-kendall_acc(sentiment_and_word_count$rating,sentiment_and_word_count$review_sent)
+
+```
+
+### 5.2. Positive Sentiment, Negative Sentiment and Uncertainity Sentiment
+
+For the 3 following benchmark models, we only trained them on a data-set with 20.000 rows as our computers couldn't train the models on an appropriate amount of time if the size was bigger.
+
+```{r}
+# Calculate the number of rows to sample for the subset
+n_rows_train = nrow(train_set)
+subset_indices = sample(1:n_rows_train, size = 80000)  # We only used a data-set with 20.000 rows as we it would take too long for a bigger data-set
+
+# Create the smaller subset from the training set
+train_subset = train_set[subset_indices, ]
+```
+
+```{r}
+loughran_words = textdata::lexicon_loughran()
+
+# extract dictionary
+positive_dict<-loughran_words %>%
+  filter(sentiment=="positive") %>%
+  pull(word)
+
+# collapse into a "document"
+positive_dict_doc<-positive_dict %>%
+  paste(collapse=" ")
+```
+
+```{r}
+#############################################
+# extract dictionary the normal way
+#############################################
+
+# Traditional dictionary approach using dfm_lookup()
+train_dicts<-train_subset %>%
+  pull(review) %>%
+  tokens() %>%
+  dfm() %>%
+  dfm_lookup(as.dictionary(loughran_words)) %>%
+  convert(to="data.frame")
+
+
+# all the dictionaries are in there!
+head(train_dicts)
+```
+
+```{r}
+# Accuracy score using positive sentiment
+acc_dict_p <- kendall_acc(train_dicts$positive,
+            train_subset$rating)
+
+# Accuracy score using uncertainty sentiment
+acc_dict_u <- kendall_acc(train_dicts$uncertainty,
+            train_subset$rating)
+
+# Accuracy score using negative sentiment
+acc_dict_n <- kendall_acc(train_dicts$negative,
+            train_subset$rating)
+```
+
+### 5.3. LM Dictionary with Grammar Awareness
+
+```{r}
+train_dicts<-train_dicts %>%
+  mutate(sentiment=positive-negative)
+
+train_subset<-train_subset %>%
+  mutate(LMsentiment=sentiment_by(review,
+                                  polarity_dt=lexicon::hash_sentiment_loughran_mcdonald) %>%
+           pull(ave_sentiment))
+
+acc_lnm <- kendall_acc(train_subset$LMsentiment,
+            train_subset$rating)
+```
+
+### 5.4. Exclamation marks
+
+```{r}
+#To add an accuracy measure for a model based on exclamation marks in the review text to predict rating, we would need to add a couple of lines to our existing code:
+
+# Count the number of exclamation marks in each review
+test_set <- test_set %>%
+  mutate(exclamation_count = stringr::str_count(review, "\\!"))
+
+# Calculate the accuracy using Kendall's Tau for the exclamation mark count
+acc_exclam <- kendall_acc(test_set$rating, test_set$exclamation_count)
+```
+
+### 5.5. Plotting the best model with the benchmarks
+
+```{r}
+
+bind_rows(acc_ngram_12 %>%
+            mutate(model="Unigrams and Bigrams"),
+          acc_ngram_23 %>%
+            mutate(model="Bigrams and Trigrams"),
+          acc_wdct %>%
+            mutate(model="Word Count"),
+          acc_sent %>%
+            mutate(model="Traditional Sentiment"),
+          acc_dict_p %>%
+            mutate(model="Traditional Positive Dictionary"),
+          acc_dict_u %>%
+            mutate(model="Traditional Uncertanty Dictionary"),
+          acc_dict_n %>%
+            mutate(model="Traditional Negative Dictionary"),
+          acc_lnm %>%
+            mutate(model="LM Dictionary with Grammar Awareness"),
+          acc_exclam %>%
+            mutate(model="Exclamation Marks Benchmark")
+          
+) %>% 
+  ggplot(aes(x=model,color=model,
+             y=acc,ymin=lower,ymax=upper)) +
+  geom_hline(yintercept=50) +              
+  geom_point() +                           
+  geom_errorbar(width=.4) +  
+  geom_text(aes(label = paste0(acc, "%")), hjust=0.5, vjust = -1.5, size = 3) +
+  labs(x="Model",                 
+       y="Accuracy") +  
+  coord_flip() + 
+  theme_bw() +                             
+  theme(axis.text=element_text(size=11),
+        axis.title=element_text(size=16),
+        panel.grid = element_blank(),
+        strip.text=element_text(size=24),
+        strip.background = element_rect(fill="white"),
+        legend.position = "none")       
+
+```
+
+We can see that the DFM Lasso Unigrams and Bigrams model achieved a significantly higher accuracy score than all other benchmarks
+
+## 6. Transfer learning
+
+We will now load a new data-set called "**Recipe Reviews and User Feedback"** which we obtained from the [UC Irvine Machine Learning Repository](https://archive.ics.uci.edu/dataset/911/recipe+reviews+and+user+feedback+dataset), that contains 18.182 rows.
+
+We will test our best performing model on this new data-set to see how it performs on new data.
+
+```{r}
+# Load the new CSV file
+new_data <- read.csv("/Users/yo/Desktop/IMPERIAL/electives/Spring/taib/taib_finalproject/Recipes/Recipe Reviews and User Feedback Dataset.csv", stringsAsFactors = FALSE)
+
+head(new_data, 5)
+```
+
+We will be focusing on two attributes of this data-set:
+
+-   text - which is equivalent to our user's reviews;
+
+-   stars - which corresponds to our user's ratings and uses the same scale: 0 - 5.
+
+```{r}
+# Prepare the text column from the new dataset
+dfm_new_data <- TAB_dfm(new_data$text, ngrams=1:2)
+
+# Since the model was trained on dfm_train_12, we need to match the new DFM columns to those
+dfm_new_data <- dfm_new_data %>%
+  dfm_match(colnames(dfm_train_12))
+
+# Now, we predict the 'stars' column in the new dataset
+new_data_predict <- predict(lasso_dfm_12, newx = as.matrix(dfm_new_data), s = "lambda.min")
+
+# Check the accuracy
+acc_new_data <- kendall_acc(new_data_predict, new_data$stars)
+
+print(acc_new_data)
+```
+
+Let's create a confusion matrix to better understand where our model predicted correctly and where did it get it wrong.
+
+```{r}
+# We'll be doing some transformations to the new_data_predict so let's create a "copy"
+predicted_ratings <- new_data_predict
+
+# Round the predictions to the nearest whole number and ensure they are within the range of 0 to 5
+predicted_ratings <- round(predicted_ratings)
+
+# Create a confusion matrix with factor levels specified to account for all potential ratings
+actual_ratings <- factor(new_data$stars, levels = 1:5)
+predicted_ratings <- factor(predicted_ratings, levels = 1:5)
+
+# Generate the confusion matrix
+conf_matrix <- table(Predicted = predicted_ratings, Actual = actual_ratings)
+
+# Convert the confusion matrix to a data frame for plotting
+conf_matrix_df <- as.data.frame(conf_matrix)
+conf_matrix_df$Total <- rowSums(conf_matrix)  # Add total predictions for each 'Predicted' rating
+conf_matrix_df$Correct <- diag(conf_matrix)   # Extract the diagonal elements for correct predictions
+conf_matrix_df$Percentage <- (conf_matrix_df$Freq / conf_matrix_df$Total) * 100  # Calculate percentage
+
+# Rename the Freq column to Count for clarity in the plot
+names(conf_matrix_df)[names(conf_matrix_df) == "Freq"] <- "Count"
+
+```
+
+```{r}
+# Plot the confusion matrix with the actual numbers and the percentage of correct predictions
+ggplot(data = conf_matrix_df, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = ifelse(Count > 0, paste0(Count, "\n(", sprintf("%.1f%%", Percentage), ")"), "")),
+            color = "black", size = 3) +
+  scale_fill_gradient(low = "white", high = "darkred") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(angle = 45, vjust = 1)) +
+  labs(x = "Actual Rating", y = "Predicted Rating", fill = "Count")
+
+```
+
+We can see the biggest "error" our model is doing when predicting the rating of a review is predicting it to be a score of 4 when the actual score is a 5. Improving this would increase the model overall accuracy exponentially.
+
+## 7. Politeness on Review Data
+
+```{r}
+'#Reducing rows to run spacy faster
+train_indices_spacy <- sample(1:n_rows, size = 100000)
+
+# Create training and test sets with lowered no of rows
+train_set_spacy <- final_data[train_indices_spacy, ]
+train_set_spacy <- train_set_spacy %>%
+  mutate(rating_category = ifelse(rating >= 0 & rating <= 3, "Mostly Negative Reviewed Recipe", "Mostly Positive Review Recipe"))
+test_set_spacy <- final_data[-train_indices_spacy, ]
+test_set_spacy <- test_set_spacy %>%
+  mutate(rating_category = ifelse(rating >= 0 & rating <= 3,"Mostly Negative Reviewed Recipe", "Mostly Positive Review Recipe"))
+
+
+ spacyr::spacy_initialize()
+ parsed_reviews <- spacy_parse(train_set_spacy$review, entity = TRUE)
+ 
+#View entities extracted from reviews
+head(parsed_reviews$entity)'
+
+
+'reviews_politeness<-politeness(train_set_spacy$review,parser="spacy")
+saveRDS(reviews_politeness,"reviews_politeness.Rds")'
+
+reviews_politeness <- readRDS("reviews_politeness.Rds")
+politenessPlot(reviews_politeness,
+               train_set_spacy$rating_category,
+               middle_out = .05)
+
+ggsave("Politeness Plot.png", height = 12, width = 15)
+```
+
+## 8. Improvements - tackling the limits and weaknesses of our models
+
+Is it our belief that the models are not performing in a sufficiently satisfactory manner. We attribute this mainly to the high skewness of the data towards very high ratings.
+
+The models we trained focused too much on predicting these high ratings and don't learn how to predict well for all ratings.
+
+**To tackle this problem we decided to balance the data-set by undersampling - every rating class will have the same number of rows.**
+
+This means we will redo some of the models we created before, but we expect better results with this improved data-set.
+
+```{r}
+# Function to perform undersampling
+undersample_data <- function(data, target_variable) {
+  # Find the size of the smallest class
+  min_class_size <- min(table(data[[target_variable]]))
+  
+  # Sample each class to have the size of the smallest class
+  data %>%
+    group_by(!!sym(target_variable)) %>%
+    sample_n(min_class_size) %>%
+    ungroup()
+}
+
+# Apply the undersampling function to your dataset
+train_set_balanced <- undersample_data(train_set, "rating")
+```
+
+```{r}
+rating_distribution <- table(train_set_balanced$rating)
+df_rating_distribution <- as.data.frame(rating_distribution)
+names(df_rating_distribution) <- c("Rating", "Frequency")
+
+# Plot the distribution of ratings using ggplot2
+ggplot(df_rating_distribution, aes(x = Rating, y = Frequency, fill = Rating)) +
+  geom_bar(stat = "identity", fill = "#F5CF35") +
+  theme_minimal() +
+  labs(title = "Distribution of Ratings in the Balanced Training Set",
+       x = "Rating",
+       y = "Frequency",
+       fill = "Rating") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Correctly closing the theme function
+```
+
+Based on this, we'll construct two models: - LASSO Model for bigrams and trigrams - LASSO Model for unigrams and bigrams
+
+
+
+### 8.1. LASSO Model for unigrams and bigrams UNDERSAMPLED
+
+```{r}
+train_set_balanced$review <- as.character(train_set_balanced$review)
+
+train_set_balanced$rating <- as.numeric(as.character(train_set_balanced$rating))
+
+test_set$rating <- as.numeric(as.character(test_set$rating))
+
+dfm_train_balanced_12<-TAB_dfm(train_set_balanced$review,ngrams=1:2)
+dfm_test_12<-TAB_dfm(test_set$review,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_balanced_12))
+
+lasso_dfm_12_balanced<-glmnet::cv.glmnet(x=dfm_train_balanced_12, 
+                             y=train_set_balanced$rating)
+
+# Plot coefficents
+plot(lasso_dfm_12_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+test_dfm_12_predict_balanced <- predict(lasso_dfm_12_balanced, newx=dfm_test_12,
+                               s='lambda.min')
+
+test_dfm_12_predict_balanced <- as.numeric(test_dfm_12_predict_balanced)
+
+acc_ngram_12_balanced <- kendall_acc(test_dfm_12_predict_balanced, test_set$rating)
+
+# Plot word map
+plotCoefs_lasso_dfm_12_balanced<-lasso_dfm_12_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_balanced<-data.frame(ngram=colnames(dfm_train_balanced_12), freq=colMeans(dfm_train_balanced_12))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.03
+low_threshold <- -0.03
+
+plotDat_relevant_coefficients <- bind_rows(plotCoefs %>% filter(score > high_threshold), 
+                                           plotCoefs %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plot_unigrams_bigrams_balanced <- plotDat_relevant_coefficients %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_unigrams_bigrams_balanced, "plot_unigrams_bigrams_balanced.png")
+print(plot_unigrams_bigrams_balanced)
+```
+
+### 8.2. LASSO Model for bigrams and trigrams UNDERSAMPLED
+
+```{r}
+dfm_train_balanced_23<-TAB_dfm(train_set_balanced$review,ngrams=2:3)
+
+dfm_test_23<-TAB_dfm(test_set$review,
+                           ngrams=2:3,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_balanced_23))
+
+lasso_dfm_23_balanced<-glmnet::cv.glmnet(x=dfm_train_balanced_23, 
+                             y=train_set_balanced$rating)
+
+# Plot coefficents
+plot(lasso_dfm_23_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+test_dfm_23_predict_balanced <- predict(lasso_dfm_23_balanced, newx=dfm_test_23,
+                               s='lambda.min')
+
+acc_ngram_23_balanced <- kendall_acc(test_dfm_23_predict_balanced, test_set$rating)
+
+
+# Plot word map
+plotCoefs_lasso_dfm_23_balanced<-lasso_dfm_23_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotDat_23_balanced<-plotCoefs_lasso_dfm_23_balanced %>%
+  left_join(data.frame(ngram=colnames(dfm_train_balanced_23),
+                       freq=colMeans(dfm_train_balanced_23))) %>%
+  mutate_at(vars(score,freq),~round(.,3))
+
+plot_bigrams_trigrams_balanced <- plotDat_23_balanced %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Bigrams and Trigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave("plot_bigrams_trigrams_balanced.png", plot = plot_bigrams_trigrams)
+
+print(plot_bigrams_trigrams_balanced)
+
+```
+
+From this plot based on the Bigrams and Trigrams model, we can see that stemmed words such as "turn_great, great_recip, realli_enjoy, thank_recip, famili_love and definit_make" are correlated with the recipe having a higher rating, while words like "thank_much_share, good_recip, thank_great_recip and veri_easi_make" are correlated with a lower rating, which is odd as these words seem to convey a good experience with the recipe.
+
+Instead of trying to predict the exact rating a recipe has, we can have a more broad approach and try to predict if the review is going to be negative or positive.
+
+We'll be considering a review to be negative if the rating is 3 or lower and to be positive if it's 4 or 5. The high skewness of the ratings distribution towards higher ratings made us choose this threshold instead of the median.
+
+```{r}
+# Let's start by creating our binary rating - This is only in case we want to do a new split in the future
+final_data_binary <- final_data
+final_data_binary$binary <- ifelse(final_data_binary$rating <= 3, 0, 1 )
+
+# Doing the same for the training and testing data sets
+train_set_binary_balanced <- train_set_balanced
+train_set_binary_balanced$binary <- ifelse(train_set_binary_balanced$rating <= 3, 0, 1 )
+
+test_set_binary <- test_set
+test_set_binary$binary <- ifelse(test_set_binary$rating <= 3, 0, 1 )
+
+```
+
+### 8.3. Binary LASSO Model for unigrams and bigrams UNDERSAMPLED
+
+```{r}
+# We repeat the same steps: stem the training and test sets
+
+dfm_train_12_binary_balanced<-TAB_dfm(train_set_binary_balanced$review,ngrams=1:2)
+dfm_test_12_binary<-TAB_dfm(test_set_binary$review,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_binary_balanced))
+
+lasso_dfm_12_binary_balanced<-glmnet::cv.glmnet(x=dfm_train_12_binary_balanced, 
+                             y=train_set_binary_balanced$rating)
+
+# Plot coefficents
+plot(lasso_dfm_12_binary_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+test_dfm_12_binary_predict_balanced <- predict(lasso_dfm_12_binary_balanced, newx=dfm_test_12_binary,
+                               s='lambda.min')
+
+acc_ngram_12_binary_balanced <- kendall_acc(test_dfm_12_binary_predict_balanced, test_set_binary$binary)
+
+# Plot word map
+plotCoefs_lasso_dfm_12_binary_balanced<-lasso_dfm_12_binary_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_binary_balanced<-data.frame(ngram=colnames(dfm_train_12_binary_balanced), freq=colMeans(dfm_train_12_binary_balanced))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.1
+low_threshold <- -0.1
+
+plotDat_relevant_coefficients_12_binary_balanced <- bind_rows(plotCoefs_lasso_dfm_12_binary_balanced %>% filter(score > high_threshold), 
+                                           plotCoefs %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_binary_balanced) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plot_binary_unigrams_bigrams_balanced <- plotDat_relevant_coefficients_12_binary_balanced %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Binary Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_binary_unigrams_bigrams_balanced, "plot_binary_unigrams_bigrams_balanced.png")
+```
+
+### 8.4. Binary LASSO Model for bigrams and trigrams UNDERSAMPLED
+
+```{r}
+dfm_train_23_binary_balanced<-TAB_dfm(train_set_binary_balanced$review,ngrams=2:3)
+
+dfm_test_23_binary<-TAB_dfm(test_set_binary$review,
+                           ngrams=2:3,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_23_binary_balanced))
+
+lasso_dfm_23_binary_balanced<-glmnet::cv.glmnet(x=dfm_train_23_binary_balanced, 
+                             y=train_set_binary_balanced$rating)
+
+# Plot coefficents
+plot(lasso_dfm_23_binary_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+test_dfm_23_binary_predict_balanced <- predict(lasso_dfm_23_binary_balanced, newx=dfm_test_23_binary,
+                               s='lambda.min')
+
+acc_ngram_23_binary_balanced <- kendall_acc(test_dfm_23_binary_predict_balanced, test_set_binary$rating)
+
+# Plot word map
+plotCoefs_lasso_dfm_23_binary_balanced<-lasso_dfm_23_binary_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotDat_23_binary_balanced<-plotCoefs_lasso_dfm_23_binary_balanced %>%
+  left_join(data.frame(ngram=colnames(dfm_train_23_binary_balanced),
+                       freq=colMeans(dfm_train_23_binary_balanced))) %>%
+  mutate_at(vars(score,freq),~round(.,3))
+
+plot_binary_bigrams_trigrams_balanced <- plotDat_23_binary_balanced %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Review")+
+  ggtitle("Bigrams and Trigrams Model for binary rating")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_binary_bigrams_trigrams_balanced, "plot_binary_bigrams_trigrams_balanced.png")
+
+```
+
+### 8.5. Aplying unigrams & bigrams stemming to users' reviews and to recipes' descriptions, steps and ingredients to predict recipes' ratings - UNDERSAMPLED
+
+#### 8.5.1. Description UNDERSAMPLED
+
+```{r}
+# unigrams and bigrams model on description
+
+dfm_train_12_description_balanced<-TAB_dfm(train_set_balanced$description,ngrams=1:2)
+dfm_test_12_description<-TAB_dfm(test_set$description,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_description_balanced))
+  
+lasso_dfm_12_description_balanced<-glmnet::cv.glmnet(x=dfm_train_12_description_balanced, 
+                             y=train_set_balanced$rating)
+
+# Plot coefficents
+plot(lasso_dfm_12_description_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+# ngram model on description
+plot(lasso_dfm_12_description_balanced)
+
+test_dfm_12_predict_description_balanced<-predict(lasso_dfm_12_description_balanced,newx = dfm_test_12_description,
+                          s="lambda.min")
+
+kendall_acc(test_dfm_12_predict_description_balanced,test_set$rating)
+
+
+# Plot word map
+plotCoefs_lasso_dfm_12_description_balanced<-lasso_dfm_12_description_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_description_balanced<-data.frame(ngram=colnames(dfm_train_12_description_balanced), freq=colMeans(dfm_train_12_description_balanced))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.03
+low_threshold <- -0.03
+
+plotDat_relevant_coefficients_12_discription_balanced <- bind_rows(plotCoefs_lasso_dfm_12_description_balanced %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12_description_balanced %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_description_balanced) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plot_description_unigrams_bigrams_balanced <- plotDat_relevant_coefficients_12_discription_balanced %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Description")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_description_unigrams_bigrams_balanced, "plot_description_unigrams_bigrams_balanced.png")
+
+```
+
+#### 8.5.2. Steps
+
+```{r}
+# unigrams and bigrams model on steps
+dfm_train_12_steps_balanced <-TAB_dfm(train_set_balanced$steps,ngrams=1:2)
+dfm_test_12_steps<-TAB_dfm(test_set$steps,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_steps_balanced))
+
+lasso_dfm_12_steps_balanced<-glmnet::cv.glmnet(x=dfm_train_12_steps_balanced, 
+                             y=train_set_balanced$rating)
+
+plot(lasso_dfm_12_steps_balanced)
+
+test_dfm_12_predict_steps_balanced<-predict(lasso_dfm_12_steps_balanced,newx = dfm_test_12_steps,
+                          s="lambda.min")
+
+kendall_acc(test_dfm_12_predict_steps_balanced,test_set$rating)
+
+
+# Plot coefficents
+plot(lasso_dfm_12_steps_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+# Plot word map
+plotCoefs_lasso_dfm_12_steps_balanced<-lasso_dfm_12_steps_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_steps_balanced<-data.frame(ngram=colnames(dfm_train_12_steps_balanced), freq=colMeans(dfm_train_12_steps_balanced))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.04
+low_threshold <- -0.04
+
+plotDat_relevant_coefficients_lasso_dfm_12_steps_balanced <- bind_rows(plotCoefs_lasso_dfm_12_steps_balanced %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12_steps_balanced %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_steps_balanced) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plot_steps_unigrams_bigrams_balanced <- plotDat_relevant_coefficients_lasso_dfm_12_steps_balanced %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Step List")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_steps_unigrams_bigrams_balanced, "plot_steps_unigrams_bigrams_balanced.png")
+
+```
+
+#### 8.5.3. Ingredients
+
+```{r}
+# unigrams and bigrams model on ingredients
+
+dfm_train_12_ingredients_balanced <-TAB_dfm(train_set_balanced$ingredients,ngrams=1:2)
+dfm_test_12_ingredients<-TAB_dfm(test_set$ingredients,
+                           ngrams=1:2,
+                           min.prop = 0) %>%
+  dfm_match(colnames(dfm_train_12_ingredients_balanced))
+  
+lasso_dfm_12_ingredients_balanced<-glmnet::cv.glmnet(x=dfm_train_12_ingredients_balanced, 
+                             y=train_set_balanced$rating)
+
+plot(lasso_dfm_12_ingredients_balanced)
+
+test_dfm_12_predict_ingredients_balanced<-predict(lasso_dfm_12_ingredients_balanced,newx = dfm_test_12_ingredients,
+                          s="lambda.min")
+
+kendall_acc(test_dfm_12_predict_ingredients_balanced,test_set$rating)
+
+
+# Plot coefficents
+plot(lasso_dfm_12_ingredients_balanced, xlab="Log Lambda", ylab="Coefficients", main="LASSO Path", col=rainbow(10))
+
+
+# Plot word map
+plotCoefs_lasso_dfm_12_ingredients_balanced<-lasso_dfm_12_ingredients_balanced %>%
+  coef(s="lambda.min") %>%
+  drop() %>%
+  as.data.frame() %>%
+  rownames_to_column(var = "ngram") %>%
+  rename(score=".") %>%
+  filter(score!=0 & ngram!="(Intercept)" & !is.na(score))  
+
+plotFreqs_lasso_dfm_12_ingredients_balanced<-data.frame(ngram=colnames(dfm_train_12_ingredients_balanced), freq=colMeans(dfm_train_12_ingredients_balanced))
+
+# We'll be filtering the coefficients based on a low and high threshold to decrease the cluttering in the plot
+high_threshold <- 0.05
+low_threshold <- -0.05
+
+plotDat_relevant_coefficients_lasso_dfm_12_ingredients_balanced <- bind_rows(plotCoefs_lasso_dfm_12_ingredients_balanced %>% filter(score > high_threshold), 
+                                           plotCoefs_lasso_dfm_12_ingredients_balanced %>% filter(score < low_threshold)) %>%
+  left_join(plotFreqs_lasso_dfm_12_ingredients_balanced) %>%
+  mutate_at(vars(score, freq), ~round(., 3))
+
+plot_ingredients_unigrams_bigrams_balanced <- plotDat_relevant_coefficients_lasso_dfm_12_ingredients_balanced %>%
+  ggplot(aes(x=score,y=freq,label=ngram,color=score)) +
+  scale_color_gradient(low="orange",
+                        
+                        high="blue")+
+  geom_vline(xintercept=0)+
+  geom_point() +
+  geom_label_repel(max.overlaps =42,
+                   point.padding = 0.7,
+                   size=2.5,
+                   force=6)+  
+  scale_y_continuous(trans="log2",
+                     breaks=c(-5,.01,.05,.1,.2,.5,1,2,5))+
+  scale_x_continuous(limits=c(-0.25,0.25))+
+  theme_bw() +
+  labs(x="Coefficient",y="Uses per Ingredient")+
+  ggtitle("Unigrams and Bigrams Model")+
+  theme(legend.position = "none",
+        axis.title=element_text(size=12),
+        plot.title=element_text(size=12),
+        axis.text=element_text(size=8))
+
+ggsave(plot = plot_ingredients_unigrams_bigrams_balanced, "plot_ingredients_unigrams_bigrams_balanced.png")
+```
+
+### 8.6. Evaluating the models performance on the undersampled data-set
+
+```{r}
+dfm_new_data <- dfm_new_data %>%
+  dfm_match(colnames(dfm_train_balanced_12))
+
+# Now, we predict the 'stars' column in the new dataset
+new_data_predict <- predict(lasso_dfm_12_balanced, newx = as.matrix(dfm_new_data), s = "lambda.min")
+
+# Check the accuracy
+acc_new_data <- kendall_acc(new_data_predict, new_data$stars)
+
+print(acc_new_data)
+
+# We'll be doing some transformations to the new_data_predict so let's create a "copy"
+predicted_ratings <- new_data_predict
+
+# Round the predictions to the nearest whole number and ensure they are within the range of 0 to 5
+predicted_ratings <- round(predicted_ratings)
+
+# Create a confusion matrix with factor levels specified to account for all potential ratings
+actual_ratings <- factor(new_data$stars, levels = 1:5)
+predicted_ratings <- factor(predicted_ratings, levels = 1:5)
+
+# Generate the confusion matrix
+conf_matrix <- table(Predicted = predicted_ratings, Actual = actual_ratings)
+
+# Convert the confusion matrix to a data frame for plotting
+conf_matrix_df <- as.data.frame(conf_matrix)
+conf_matrix_df$Total <- rowSums(conf_matrix)  # Add total predictions for each 'Predicted' rating
+conf_matrix_df$Correct <- diag(conf_matrix)   # Extract the diagonal elements for correct predictions
+conf_matrix_df$Percentage <- (conf_matrix_df$Freq / conf_matrix_df$Total) * 100  # Calculate percentage
+
+# Rename the Freq column to Count for clarity in the plot
+names(conf_matrix_df)[names(conf_matrix_df) == "Freq"] <- "Count"
+
+```
+
+```{r}
+# Plot the confusion matrix with the actual numbers and the percentage of correct predictions
+ggplot(data = conf_matrix_df, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "black") +
+  geom_text(aes(label = ifelse(Count > 0, paste0(Count, "\n(", sprintf("%.1f%%", Percentage), ")"), "")),
+            color = "black", size = 3) +
+  scale_fill_gradient(low = "white", high = "darkred") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.text.y = element_text(angle = 45, vjust = 1)) +
+  labs(x = "Actual Rating", y = "Predicted Rating", fill = "Count")
+
+```
